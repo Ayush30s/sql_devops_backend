@@ -1,0 +1,528 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum Theme {
+  SYSTEM
+  LIGHT
+  DARK
+}
+
+enum CourseKind {
+  SQL
+  LINUX
+}
+
+enum Difficulty {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+enum SqlVerification {
+  EXACT_RESULT
+  UNORDERED_RESULT
+  ORDERED_RESULT
+  ROW_COUNT
+  SCHEMA
+  CUSTOM
+}
+
+enum AttemptStatus {
+  CORRECT
+  INCORRECT
+  ERROR
+  TIMEOUT
+  UNSAFE
+}
+
+enum ProgressStatus {
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum LabKind {
+  PLAYGROUND
+  EXERCISE
+  INCIDENT
+}
+
+enum IncidentStatus {
+  INVESTIGATING
+  RESOLVED
+  GAVE_UP
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         Role     @default(USER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  profile          Profile?
+  sessions         Session[]
+  attempts         ExerciseAttempt[]
+  exerciseProgress ExerciseProgress[]
+  topicProgress    TopicProgress[]
+  achievements     UserAchievement[]
+  streak           Streak?
+  labSessions      LabSession[]
+  queryHistory     QueryHistory[]
+  commandHistory   CommandHistory[]
+  topicLikes       TopicLike[]
+  topicReviews     TopicReview[]
+  incidentRuns     IncidentRun[]
+
+  @@map("users")
+}
+
+/// Profile and preferences (one row per user).
+model Profile {
+  userId         String   @id @db.Uuid
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bio            String   @default("")
+  timezone       String   @default("UTC")
+  theme          Theme    @default(SYSTEM)
+  editorFontSize Int      @default(15)
+  focusMode      Boolean  @default(false)
+  /// Opt out and your name disappears from the leaderboard for everyone.
+  onLeaderboard  Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@map("profiles")
+}
+
+/// Opaque session tokens; only the SHA-256 hash is stored.
+model Session {
+  id         String   @id @default(uuid()) @db.Uuid
+  tokenHash  String   @unique
+  userId     String   @db.Uuid
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  userAgent  String?
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model Course {
+  id          String     @id @default(uuid()) @db.Uuid
+  slug        String     @unique
+  kind        CourseKind
+  title       String
+  description String     @default("")
+  position    Int        @default(0)
+  modules     Module[]
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@map("courses")
+}
+
+model Module {
+  id          String   @id @default(uuid()) @db.Uuid
+  courseId    String   @db.Uuid
+  course      Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  slug        String
+  title       String
+  description String   @default("")
+  position    Int      @default(0)
+  topics      Topic[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([courseId, slug])
+  @@index([courseId, position])
+  @@map("modules")
+}
+
+/// A topic is one lesson (markdown `content`) plus its practice exercises.
+model Topic {
+  id            String          @id @default(uuid()) @db.Uuid
+  moduleId      String          @db.Uuid
+  module        Module          @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  slug          String
+  title         String
+  summary       String          @default("")
+  difficulty    Difficulty      @default(BEGINNER)
+  content       String          @default("")
+  datasetId     String?         @db.Uuid
+  dataset       SqlDataset?     @relation(fields: [datasetId], references: [id], onDelete: SetNull)
+  position      Int             @default(0)
+  prerequisites Topic[]         @relation("TopicPrerequisites")
+  requiredBy    Topic[]         @relation("TopicPrerequisites")
+  exercises     Exercise[]
+  progress      TopicProgress[]
+  likes         TopicLike[]
+  reviews       TopicReview[]
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  @@unique([moduleId, slug])
+  @@index([moduleId, position])
+  @@map("topics")
+}
+
+/// "This helped" on a topic: one per learner, toggled at the top of the lesson.
+model TopicLike {
+  userId    String   @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  topicId   String   @db.Uuid
+  topic     Topic    @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@id([userId, topicId])
+  @@index([topicId])
+  @@map("topic_likes")
+}
+
+/// A learner's written review of a topic, shown under the lesson with their name.
+model TopicReview {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  topicId   String   @db.Uuid
+  topic     Topic    @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  /// 1-5; the admin analytics average it per topic.
+  rating    Int?
+  body      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, topicId])
+  @@index([topicId, createdAt])
+  @@map("topic_reviews")
+}
+
+/// SQL exercises and Linux exercises/challenges share one table and one attempt pipeline.
+model Exercise {
+  id           String             @id @default(uuid()) @db.Uuid
+  topicId      String             @db.Uuid
+  topic        Topic              @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  slug         String             @unique
+  kind         CourseKind
+  isChallenge  Boolean            @default(false)
+  title        String
+  story        String             @default("")
+  prompt       String
+  difficulty   Difficulty
+  xp           Int
+  hints        String[]
+  explanation  String             @default("")
+  starterCode  String             @default("")
+  solution     String
+  position     Int                @default(0)
+  /// Slugs of earlier topics this exercise also drills. Empty = focused on its own topic.
+  mixes        String[]
+  // SQL
+  datasetId    String?            @db.Uuid
+  dataset      SqlDataset?        @relation(fields: [datasetId], references: [id], onDelete: SetNull)
+  verification SqlVerification?
+  checkSql     String?
+  // Linux: bash run as root in a fresh lab before the learner starts, and state checks.
+  setupScript  String?
+  checks       Json?
+  attempts     ExerciseAttempt[]
+  progress     ExerciseProgress[]
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  @@index([topicId, position])
+  @@map("exercises")
+}
+
+model ExerciseAttempt {
+  id         String        @id @default(uuid()) @db.Uuid
+  userId     String        @db.Uuid
+  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  exerciseId String        @db.Uuid
+  exercise   Exercise      @relation(fields: [exerciseId], references: [id], onDelete: Cascade)
+  code       String
+  status     AttemptStatus
+  feedback   String        @default("")
+  durationMs Int           @default(0)
+  createdAt  DateTime      @default(now())
+
+  @@index([userId, createdAt])
+  @@index([exerciseId, status])
+  @@map("exercise_attempts")
+}
+
+model ExerciseProgress {
+  userId            String         @db.Uuid
+  user              User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  exerciseId        String         @db.Uuid
+  exercise          Exercise       @relation(fields: [exerciseId], references: [id], onDelete: Cascade)
+  status            ProgressStatus @default(IN_PROGRESS)
+  attempts          Int            @default(0)
+  correctAttempts   Int            @default(0)
+  incorrectAttempts Int            @default(0)
+  hintsUsed         Int            @default(0)
+  solutionRevealed  Boolean        @default(false)
+  xpEarned          Int            @default(0)
+  timeSpentSec      Int            @default(0)
+  firstAttemptAt    DateTime?
+  lastAttemptAt     DateTime?
+  completedAt       DateTime?
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  @@id([userId, exerciseId])
+  @@index([exerciseId])
+  @@map("exercise_progress")
+}
+
+model TopicProgress {
+  userId            String    @db.Uuid
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  topicId           String    @db.Uuid
+  topic             Topic     @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  startedAt         DateTime  @default(now())
+  lessonCompletedAt DateTime?
+  completedAt       DateTime?
+  lastActivityAt    DateTime  @default(now())
+  timeSpentSec      Int       @default(0)
+
+  @@id([userId, topicId])
+  @@index([userId, lastActivityAt])
+  @@map("topic_progress")
+}
+
+/// Practice datasets. `setupSql` (schema + seed rows) is replayed into a throwaway schema for every run.
+model SqlDataset {
+  id           String         @id @default(uuid()) @db.Uuid
+  slug         String         @unique
+  name         String
+  description  String         @default("")
+  setupSql     String
+  tables       SqlTable[]
+  topics       Topic[]
+  exercises    Exercise[]
+  queryHistory QueryHistory[]
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  @@map("sql_datasets")
+}
+
+/// Schema-browser metadata derived from `SqlDataset.setupSql`.
+model SqlTable {
+  id        String     @id @default(uuid()) @db.Uuid
+  datasetId String     @db.Uuid
+  dataset   SqlDataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+  name      String
+  columns   Json
+  rowCount  Int
+  position  Int        @default(0)
+
+  @@unique([datasetId, name])
+  @@map("sql_tables")
+}
+
+model QueryHistory {
+  id         String      @id @default(uuid()) @db.Uuid
+  userId     String      @db.Uuid
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  datasetId  String?     @db.Uuid
+  dataset    SqlDataset? @relation(fields: [datasetId], references: [id], onDelete: SetNull)
+  exerciseId String?     @db.Uuid
+  sql        String
+  status     String
+  rowCount   Int?
+  durationMs Int
+  error      String?
+  createdAt  DateTime    @default(now())
+
+  @@index([userId, createdAt])
+  @@map("query_history")
+}
+
+/// One simulated Linux machine per user and kind; `state` is the gzipped machine snapshot.
+model LabSession {
+  id             String           @id @default(uuid()) @db.Uuid
+  userId         String           @db.Uuid
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind           LabKind
+  exerciseId     String?          @db.Uuid
+  state          Bytes
+  startedAt      DateTime         @default(now())
+  lastActivityAt DateTime         @default(now())
+  commandCount   Int              @default(0)
+  commands       CommandHistory[]
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  @@unique([userId, kind])
+  @@map("lab_sessions")
+}
+
+model CommandHistory {
+  id           String     @id @default(uuid()) @db.Uuid
+  userId       String     @db.Uuid
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  labSessionId String     @db.Uuid
+  labSession   LabSession @relation(fields: [labSessionId], references: [id], onDelete: Cascade)
+  exerciseId   String?    @db.Uuid
+  command      String
+  output       String
+  exitCode     Int
+  durationMs   Int
+  createdAt    DateTime   @default(now())
+
+  @@index([userId, createdAt])
+  @@index([labSessionId, createdAt])
+  @@map("command_history")
+}
+
+model Achievement {
+  id          String            @id @default(uuid()) @db.Uuid
+  slug        String            @unique
+  title       String
+  description String
+  criteria    Json
+  position    Int               @default(0)
+  users       UserAchievement[]
+
+  @@map("achievements")
+}
+
+model UserAchievement {
+  userId        String      @db.Uuid
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  achievementId String      @db.Uuid
+  achievement   Achievement @relation(fields: [achievementId], references: [id], onDelete: Cascade)
+  earnedAt      DateTime    @default(now())
+
+  @@id([userId, achievementId])
+  @@map("user_achievements")
+}
+
+model Streak {
+  userId         String   @id @db.Uuid
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  current        Int      @default(0)
+  longest        Int      @default(0)
+  /// YYYY-MM-DD in the learner's timezone.
+  lastActiveDate String?
+  updatedAt      DateTime @updatedAt
+
+  @@map("streaks")
+}
+
+/// One rung of the fighter-rank ladder: the rank, the fighter on it and the level that unlocks it.
+/// A learner's rank is derived from their level, so nothing points here.
+model RankTier {
+  id        String   @id @default(uuid()) @db.Uuid
+  tier      Int      @unique
+  key       String   @unique
+  rank      String
+  minLevel  Int      @unique
+  character String
+  epithet   String
+  image     String
+  colorA    String
+  colorB    String
+  glow      String
+  /// Why this fighter stands at this rank, shown on the ranks page.
+  about     String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("rank_tiers")
+}
+
+/// A production incident to investigate: the alert and briefing learners see first, the server and
+/// database they investigate, and (hidden until it is resolved) what actually happened.
+model IncidentScenario {
+  id            String        @id @default(uuid()) @db.Uuid
+  /// "INC-1001": the ticket number, and the incident's address.
+  code          String        @unique
+  /// What the alert says is wrong, never why.
+  title         String
+  /// 1 (one server, one obvious problem) to 5 (millions of users, several failures at once).
+  level         Int
+  severity      String
+  usersAffected Int
+  position      Int           @default(0)
+  /// Story time of the alert: the simulated server's clock starts here and runs on from it.
+  startsAt      DateTime
+  /// The page that interrupts the on-call engineer: shown before the investigation starts.
+  alert         String
+  architecture  String        @default("")
+  /// What the learner has to work with: tools, hosts, the database, the business impact.
+  briefing      Json
+  /// Hidden: bash run as root on a fresh simulated server (after the generated logs are written).
+  machineSetup  String
+  /// Hidden: SQL that builds the incident's database, replayed under every query like a dataset.
+  databaseSql   String
+  /// Hidden: how the system behaves: its probe, states, logs, HTTP answers and metrics (lib/incidents).
+  model         Json
+  /// The question asked to close the incident, with its options; the answer stays hidden.
+  diagnosis     Json
+  /// Hidden until resolved: root cause, evidence, fix, verification, prevention, the postmortem's facts.
+  solution      Json
+  /// Three levels, concept to command; each one shown costs points.
+  hints         Json          @default("[]")
+  /// Hidden: how a run is scored: the evidence to find, how to verify, which risky actions belong to the fix.
+  scoring       Json          @default("{}")
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  runs          IncidentRun[]
+
+  @@map("incident_scenarios")
+}
+
+/// One learner working one incident, once. Starting over mid-investigation resets it; once it is
+/// finished it stays, scored, in the learner's history, and the next attempt is a new run.
+model IncidentRun {
+  id             String           @id @default(uuid()) @db.Uuid
+  userId         String           @db.Uuid
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  scenarioId     String           @db.Uuid
+  scenario       IncidentScenario @relation(fields: [scenarioId], references: [id], onDelete: Cascade)
+  status         IncidentStatus   @default(INVESTIGATING)
+  /// Real time the investigation started; with the scenario's startsAt it sets the story clock.
+  startedAt      DateTime         @default(now())
+  resolvedAt     DateTime?
+  /// SQL the learner ran that changed the database, replayed in order before every query.
+  sqlJournal     String[]
+  /// The system as last probed: its state, the numbers behind the metrics, whether the service runs.
+  health         Json
+  /// Story time up to which the services' logs have been written.
+  loggedUntil    DateTime
+  commands       Int              @default(0)
+  queries        Int              @default(0)
+  /// The root cause the learner chose when closing the incident.
+  diagnosis      String?
+  /// The prevention the learner chose when closing it.
+  prevention     String?
+  hintsUsed      Int              @default(0)
+  wrongDiagnoses Int              @default(0)
+  /// What happened, in story time: commands, queries, hints, the system's changes of state. The postmortem's timeline.
+  events         Json             @default("[]")
+  /// 0-100, set when the run is finished; scoreDetail says how it was made.
+  score          Int?
+  scoreDetail    Json?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  @@index([userId, scenarioId, startedAt])
+  @@index([scenarioId])
+  @@map("incident_runs")
+}

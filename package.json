@@ -1,0 +1,48 @@
+{
+  "name": "@dsa/backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "postinstall": "prisma generate",
+    "setup": "node scripts/db.mjs init && prisma migrate deploy && npm run db:seed",
+    "predev": "node scripts/db.mjs start --if-local",
+    "dev": "node --watch --env-file-if-exists=.env src/server.ts",
+    "prestart": "node scripts/db.mjs start --if-local",
+    "start": "node --env-file-if-exists=.env src/server.ts",
+    "db:start": "node scripts/db.mjs start",
+    "db:stop": "node scripts/db.mjs stop",
+    "db:status": "node scripts/db.mjs status",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:seed": "node --env-file-if-exists=.env prisma/seed.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration --no-file-parallelism"
+  },
+  "prisma": {
+    "seed": "node prisma/seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "highlight.js": "^11.12.0",
+    "jmespath": "^0.16.0",
+    "just-bash": "^3.6.0",
+    "marked": "^18.0.14",
+    "pg": "^8.23.1",
+    "pg-cursor": "^2.22.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/jmespath": "^0.15.2",
+    "@types/node": "^24.19.1",
+    "@types/pg": "^8.23.1",
+    "@types/pg-cursor": "^2.7.2",
+    "prisma": "^6.19.3",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.3"
+  }
+}
